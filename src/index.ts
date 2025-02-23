@@ -39,7 +39,7 @@ const pool = mysql.createPool(databaseUrl);
 // テーブルスキーマのリソース登録
 server.resource(
   "table-schema",
-  new ResourceTemplate("mysql://{tableName}/schema", {
+  new ResourceTemplate("mysql://database/{tableName}/schema", {
     list: async () => {
       const connection = await pool.getConnection();
       try {
@@ -49,7 +49,7 @@ server.resource(
         );
         return {
           resources: (rows as any[]).map((row) => ({
-            uri: new URL(`${row.TABLE_NAME}/schema`, resourceBaseUrl).href,
+            uri: new URL(`${row.TABLE_NAME}/schema`, "mysql://database").href,
             mimeType: "application/json",
             name: `"${row.TABLE_NAME}" database schema`,
           })),
@@ -67,7 +67,6 @@ server.resource(
           "FROM information_schema.columns WHERE table_name = ? AND table_schema = ?",
         [tableName, resourceBaseUrl.pathname.replace("/", "")]
       );
-
       return {
         contents: [
           {
