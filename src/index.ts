@@ -1,18 +1,16 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-  CallToolRequestSchema,
-  ListResourcesRequestSchema,
-  ListToolsRequestSchema,
-  ReadResourceRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+  McpServer,
+  ResourceTemplate,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import mysql from "mysql2/promise";
+import { z } from "zod";
 
-const server = new Server(
+const server = new McpServer(
   {
-    name: "example-servers/mysql",
+    name: "mysql",
     version: "0.1.0",
   },
   {
@@ -38,107 +36,74 @@ resourceBaseUrl.password = "";
 // データベース接続プールの作成
 const pool = mysql.createPool(databaseUrl);
 
-const SCHEMA_PATH = "schema";
-
-// リソース一覧の取得ハンドラ
-server.setRequestHandler(ListResourcesRequestSchema, async () => {
-  const connection = await pool.getConnection();
-  try {
-    const [rows] = await connection.query(
-      "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
-      [resourceBaseUrl.pathname.replace("/", "")]
-    );
-
-    return {
-      resources: (rows as any[]).map((row) => ({
-        uri: new URL(`${row.TABLE_NAME}/${SCHEMA_PATH}`, resourceBaseUrl).href,
-        mimeType: "application/json",
-        name: `"${row.TABLE_NAME}" database schema`,
-      })),
-    };
-  } finally {
-    connection.release();
-  }
-});
-
-// リソース読み取りハンドラ
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const resourceUrl = new URL(request.params.uri);
-
-  const pathComponents = resourceUrl.pathname.split("/");
-  const schema = pathComponents.pop();
-  const tableName = pathComponents.pop();
-
-  if (schema !== SCHEMA_PATH) {
-    throw new Error("Invalid resource URI");
-  }
-
-  const connection = await pool.getConnection();
-  try {
-    const [rows] = await connection.query(
-      "SELECT column_name, data_type, is_nullable, column_key " +
-        "FROM information_schema.columns WHERE table_name = ? AND table_schema = ?",
-      [tableName, resourceBaseUrl.pathname.replace("/", "")]
-    );
-
-    return {
-      contents: [
-        {
-          uri: request.params.uri,
-          mimeType: "application/json",
-          text: JSON.stringify(rows, null, 2),
-        },
-      ],
-    };
-  } finally {
-    connection.release();
-  }
-});
-
-// ツール一覧の取得ハンドラ
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      {
-        name: "query",
-        description: "Run a read-only SQL query",
-        inputSchema: {
-          type: "object",
-          properties: {
-            sql: { type: "string" },
-          },
-        },
-      },
-    ],
-  };
-});
-
-// ツール実行ハンドラ
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "query") {
-    const sql = request.params.arguments?.sql as string;
-
+// テーブルスキーマのリソース登録
+server.resource(
+  "table-schema",
+  new ResourceTemplate("mysql://{tableName}/schema", {
+    list: async () => {
+      const connection = await pool.getConnection();
+      try {
+        const [rows] = await connection.query(
+          "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+          [resourceBaseUrl.pathname.replace("/", "")]
+        );
+        return {
+          resources: (rows as any[]).map((row) => ({
+            uri: new URL(`${row.TABLE_NAME}/schema`, resourceBaseUrl).href,
+            mimeType: "application/json",
+            name: `"${row.TABLE_NAME}" database schema`,
+          })),
+        };
+      } finally {
+        connection.release();
+      }
+    },
+  }),
+  async (uri, { tableName }) => {
     const connection = await pool.getConnection();
     try {
-      await connection.beginTransaction();
-      connection.query("SET TRANSACTION READ ONLY");
-
-      const [rows] = await connection.query(sql);
-      await connection.commit();
+      const [rows] = await connection.query(
+        "SELECT column_name, data_type, is_nullable, column_key " +
+          "FROM information_schema.columns WHERE table_name = ? AND table_schema = ?",
+        [tableName, resourceBaseUrl.pathname.replace("/", "")]
+      );
 
       return {
-        content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
-        isError: false,
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(rows, null, 2),
+          },
+        ],
       };
-    } catch (error) {
-      await connection.rollback();
-      throw error;
     } finally {
       connection.release();
     }
   }
-  throw new Error(`Unknown tool: ${request.params.name}`);
-});
+);
+
+// クエリ実行ツールの登録
+server.tool(
+  "query",
+  "Run a read-only SQL query",
+  {
+    sql: z.string(),
+  },
+  async (params) => {
+    const sql = params.sql;
+    const connection = await pool.getConnection();
+    try {
+      const [rows] = await connection.query(sql);
+      return {
+        content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+        isError: false,
+      };
+    } finally {
+      connection.release();
+    }
+  }
+);
 
 // サーバーの起動
 async function runServer() {
